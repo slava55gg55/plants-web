@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Plant Simulator</title>
+  <link rel="stylesheet" href="plant_style.css">
+</head>
+<body>
+  <div class="container">
+    <h1>🌱 Симулятор Растений</h1>
+
+    <div class="controls">
+      <label>Свет (0–100): <input type="range" id="light" min="0" max="100" value="50"></label>
+      <label>Температура (°C): <input type="range" id="temp" min="0" max="40" value="20"></label>
+      <label>Влажность (%): <input type="range" id="humidity" min="0" max="100" value="50"></label>
+      <label>Вода (мл/день): <input type="range" id="water" min="0" max="200" value="100"></label>
+      <label>Тип растения:
+        <select id="plantType">
+          <option value="flower">Цветок</option>
+          <option value="algae">Водоросль</option>
+          <option value="succulent">Суккулент</option>
+        </select>
+      </label>
+      <button id="simulate">Симулировать</button>
+    </div>
+
+    <div class="stats">
+      <p>Рост: <span id="growth">0</span> см</p>
+      <p>Здоровье: <span id="health">100</span>%</p>
+      <p>Цвет листьев: <span id="color">Зелёный</span></p>
+    </div>
+
+    <div class="plant">
+      <div id="stem"></div>
+    </div>
+  </div>
+
+  <script src="grow_logic.js"></script>
+</body>
+</html>
