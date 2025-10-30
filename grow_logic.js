@@ -1,317 +1,247 @@
-// grow_logic.js
-// Процедурный визуал растений (canvas). Три типа: flower/tree, succulent, algae.
-// Чистый JS, без зависимостей.
-
+// simple visual plant simulator (pure JS + SVG)
+// replace / plug into index.html
 (() => {
-  const canvas = document.getElementById('scene');
-  const ctx = canvas.getContext('2d', { alpha: true });
-  let W = 900, H = 520;
-  function fit() { 
-    const r = canvas.getBoundingClientRect();
-    W = Math.max(300, Math.floor(r.width));
-    H = Math.max(260, Math.floor(r.height));
-    canvas.width = W; canvas.height = H;
-  }
-  fit();
-  window.addEventListener('resize', () => { fit(); render(); });
+  const scene = document.getElementById('scene');
+  const rootGroup = document.getElementById('plantRoot');
+  const waterGroup = document.getElementById('waterGroup');
 
-  // UI
-  const lightIn = document.getElementById('light');
-  const spectrumIn = document.getElementById('spectrum');
-  const tempIn = document.getElementById('temp');
-  const humidityIn = document.getElementById('humidity');
-  const plantSel = document.getElementById('plantType');
-  const resetBtn = document.getElementById('resetBtn');
-  const growFast = document.getElementById('growFast');
+  const lightEl = document.getElementById('light');
+  const tempEl = document.getElementById('temp');
+  const humEl = document.getElementById('hum');
+  const typeEl = document.getElementById('plantType');
 
   const biomEl = document.getElementById('biom');
   const healthEl = document.getElementById('health');
   const modeEl = document.getElementById('mode');
+  const restartBtn = document.getElementById('restart');
 
-  // State
-  let running = true;
-  let time = 0;
-  let speed = 1;
-  let plant = null;
+  let state = {
+    type: typeEl.value,
+    light: +lightEl.value,
+    temp: +tempEl.value,
+    hum: +humEl.value,
+    time: 0,
+    biomass: 0.05,
+    running: true,
+  };
 
-  // Helpers
-  function rand(a,b){return a + Math.random()*(b-a)}
-  function lerp(a,b,t){return a + (b-a)*t}
-  function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+  // presets
+  const presets = {
+    herb: { pmax: 7, angle: 18, branchProb: 0.45, maxDepth: 4, thickness: 8, leafSize: 12 },
+    succulent: { pmax: 3.5, angle: 14, branchProb: 0.2, maxDepth: 3, thickness: 12, leafSize: 18 },
+    algae: { pmax: 12, angle: 8, branchProb: 0.1, maxDepth: 12, thickness: 2, leafSize: 6 },
+    tree: { pmax: 5, angle: 20, branchProb: 0.6, maxDepth: 6, thickness: 10, leafSize: 10 }
+  };
 
-  // Plant models
-  function createPlant(type) {
-    const baseX = W/2;
-    const groundY = H * (type === 'algae' ? 0.9 : 0.88);
-    if(type === 'algae'){
-      // group of blades
-      const blades = [];
-      const count = 18;
-      for(let i=0;i<count;i++){
-        blades.push({
-          x: baseX - 200 + i*(400/count),
-          length: rand(60,200),
-          phase: Math.random()*Math.PI*2,
-          thickness: rand(4,10),
-          hue: rand(160,200),
-          growth: 0.01 + Math.random()*0.02
-        });
-      }
-      return { type, blades, baseX, groundY, biomass:0.1, health:1 };
-    }
-
-    // tree / succulent: node-based branching
-    const nodes = [];
-    const trunk = {
-      x: baseX, y: groundY, angle: -Math.PI/2, len: rand(14,24), thickness: rand(8,14),
-      parent: null, depth: 0, energy: 1.0, grown:0, id:0
-    };
-    nodes.push(trunk);
-    return { type, nodes, baseX, groundY, nextId:1, biomass:0.05, health:1, lastBranchTime:0 };
+  // utility: clear root
+  function clearScene(){
+    while(rootGroup.firstChild) rootGroup.removeChild(rootGroup.firstChild);
   }
 
-  function reset() { plant = createPlant(plantSel.value); time = 0; render(); }
-  reset();
+  // map helper
+  function lerp(a,b,t){return a+(b-a)*t}
 
-  resetBtn.onclick = reset;
-  plantSel.onchange = reset;
-  growFast.onclick = () => { speed = speed === 1 ? 6 : 1; growFast.textContent = speed===1 ? 'Ускорить рост' : 'Норм скорость'; };
+  // simple growth function (returns growth factor 0..1)
+  function growthFactor(){
+    // light, temp, hum mapped to [0..1]
+    const L = Math.max(0, Math.min(1, state.light/800));
+    const T = Math.max(0, Math.min(1, 1 - Math.abs(state.temp - 25)/20)); // peak at 25
+    const H = Math.max(0, Math.min(1, state.hum/90));
+    // weighted product
+    return L * 0.6 + T * 0.3 + H * 0.1;
+  }
 
-  // Growth rules
-  function update(dt) {
-    if(!plant) return;
-    const light = +lightIn.value/100; // 0..1
-    const spectrum = +spectrumIn.value/100; // 0..1 (red->blue)
-    const temp = +tempIn.value;
-    const humidity = +humidityIn.value/100;
-    // simple health model
-    const tempOpt = (plant.type==='algae'?18:22);
-    const tempFactor = Math.exp(-Math.pow((temp - tempOpt)/8,2));
-    plant.health = clamp( (plant.health*0.98 + tempFactor*0.02) , 0.05, 1);
+  // draw recursive branching (SVG paths)
+  function drawBranch(x,y, length, angleDeg, depth, params, growth, branchColor){
+    // create a path for the segment from (x,y) to new point
+    const rad = angleDeg * Math.PI/180;
+    const nx = x - Math.sin(rad)*length;
+    const ny = y - Math.cos(rad)*length;
 
-    if(plant.type === 'algae'){
-      plant.biomass += 0.0006 * light * dt * (1 + spectrum*0.6);
-      for(const b of plant.blades){
-        // growth adds to length
-        b.length = clamp(b.length + b.growth * dt * (0.8 + light*1.2), 0, 600);
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    path.setAttribute('d', `M ${x} ${y} L ${nx} ${ny}`);
+    const thickness = Math.max(1, (params.thickness * (1 - depth/ (params.maxDepth+1))) * (0.5+growth*0.5));
+    path.setAttribute('stroke', branchColor);
+    path.setAttribute('stroke-width', thickness);
+    path.setAttribute('fill', 'none');
+    path.classList.add('branch');
+    rootGroup.appendChild(path);
+
+    // add leaf if near end and not algae
+    if(depth >= params.maxDepth - 1 && state.type !== 'algae'){
+      const leaf = document.createElementNS('http://www.w3.org/2000/svg','ellipse');
+      const lx = nx - Math.sin(rad)*(params.leafSize*0.3);
+      const ly = ny - Math.cos(rad)*(params.leafSize*0.3);
+      leaf.setAttribute('cx', lx);
+      leaf.setAttribute('cy', ly);
+      leaf.setAttribute('rx', params.leafSize * (0.6 + 0.4*Math.random()));
+      leaf.setAttribute('ry', params.leafSize * (0.3 + 0.3*Math.random()));
+      leaf.setAttribute('transform', `rotate(${(Math.random()*40-20)+ (angleDeg* -1)} ${lx} ${ly})`);
+      leaf.setAttribute('fill', 'url(#leafGrad)');
+      leaf.classList.add('leaf');
+      rootGroup.appendChild(leaf);
+    }
+
+    // branching
+    if(depth < params.maxDepth){
+      const branches = Math.random() < params.branchProb ? 2 : 1;
+      for(let i=0;i<branches;i++){
+        const sign = i===0 ? -1 : 1;
+        const baseAngle = angleDeg + sign * (params.angle + Math.random()*12);
+        // length reduces per depth, growth scales
+        const nLen = length * (0.6 + 0.15*Math.random()) * (0.5 + growth*0.8);
+        // recursion with slight randomness
+        drawBranch(nx, ny, nLen, baseAngle, depth+1, params, growth, branchColor);
       }
+    }
+  }
+
+  // algae: create waving fronds in water
+  function drawAlgae(params, growth){
+    // show water
+    waterGroup.style.opacity = 1.0;
+    // multiple fronds
+    const frondCount = Math.round(6 + growth*18);
+    for(let i=0;i<frondCount;i++){
+      const x = 200 + i * (400/frondCount) + (Math.random()*40-20);
+      const baseY = 560;
+      const height = lerp(60, 240, growth) * (0.7 + Math.random()*0.6);
+      const controlX = x + (Math.random()*80-40);
+      const controlY = baseY - height * (0.5 + Math.random()*0.4);
+      const tipX = x + (Math.random()*40-20);
+      const tipY = baseY - height;
+      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+      const d = `M ${x} ${baseY} Q ${controlX} ${controlY} ${tipX} ${tipY}`;
+      path.setAttribute('d', d);
+      path.setAttribute('stroke', '#2a9df4');
+      path.setAttribute('stroke-width', Math.max(1, params.thickness * (0.4 + Math.random())));
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke-linecap','round');
+      path.setAttribute('opacity', 0.9);
+      // animation via path length dashoffset trick
+      path.style.strokeDasharray = 1000;
+      path.style.strokeDashoffset = 1000 - growth*900;
+      path.style.transition = 'stroke-dashoffset 0.6s linear';
+      rootGroup.appendChild(path);
+
+      // small leaf shapes near tip
+      if(Math.random() > 0.4){
+        const circ = document.createElementNS('http://www.w3.org/2000/svg','ellipse');
+        circ.setAttribute('cx', tipX);
+        circ.setAttribute('cy', tipY);
+        circ.setAttribute('rx', 6 + Math.random()*6);
+        circ.setAttribute('ry', 3 + Math.random()*3);
+        circ.setAttribute('fill','#66c7ff');
+        circ.setAttribute('opacity',0.9);
+        rootGroup.appendChild(circ);
+      }
+    }
+  }
+
+  // build plant based on state.type
+  function buildPlant(){
+    clearScene();
+    waterGroup.style.opacity = 0.0;
+    const g = growthFactor();
+    const params = presets[state.type];
+
+    // set biom and health visuals
+    state.biomass = Math.max(0.01, lerp(state.biomass, g * params.pmax, 0.02));
+    biomEl.textContent = state.biomass.toFixed(2);
+    const health = Math.round(g * 100);
+    healthEl.textContent = `${health}%`;
+    modeEl.textContent = 'growing';
+
+    // color of branch depends on type
+    const branchColor = state.type === 'succulent' ? '#5a8a5a' : '#6a4b2a';
+
+    if(state.type === 'algae'){
+      drawAlgae(params, g);
+      // add subtle wave animation: use transform to shift group
+      rootGroup.style.transition = 'transform 1.2s ease-in-out';
+      const sway = Math.sin(state.time*0.006)*8;
+      rootGroup.style.transform = `translate(${sway}px,0)`;
       return;
     }
 
-    // for tree/flower/succulent: node growth
-    plant.biomass += 0.0008 * dt * light;
+    // general plant: trunk + recursive branches
+    // trunk base
+    const trunkLen = lerp(30, 140, g) * (state.type === 'tree' ? 1.6 : 1.0);
+    const trunk = document.createElementNS('http://www.w3.org/2000/svg','path');
+    const startX = 0, startY = 0;
+    const endX = 0, endY = -trunkLen;
+    // trunk path in local coordinates — will be transformed by rootGroup translate
+    trunk.setAttribute('d', `M ${startX} ${startY} L ${endX} ${endY}`);
+    trunk.setAttribute('stroke', '#6a4b2a');
+    trunk.setAttribute('stroke-width', params.thickness * (0.9 + g*0.6));
+    trunk.setAttribute('stroke-linecap','round');
+    trunk.setAttribute('fill','none');
+    rootGroup.appendChild(trunk);
 
-    // iterate nodes; tips grow
-    const tips = plant.nodes.filter(n => !plant.nodes.some(ch => ch.parent===n.id));
-    for(const t of tips){
-      // growth speed depends on health and light
-      const growthSpeed = 0.6 * plant.health * light * (plant.type==='succulent'?0.35:1.0);
-      t.grown += growthSpeed * dt * 0.05;
-      // extend tip
-      if(t.grown > 1){
-        // create new tip or branch
-        const branchProb = 0.18 * (plant.type==='succulent'?0.03:1) * (1 - t.depth*0.12);
-        // direction influenced by spectrum: blue -> more upward, red -> more lateral
-        const spectrumBias = lerp(-0.35, 0.25, spectrum); // negative -> left bias, positive -> up bias
-        const lightBias = lerp(-0.4,0.4, (0.5 - (light - 0.5)) ); // slight shift based on light distribution
-        let angleVar = rand(-0.7,0.7) + spectrumBias + lightBias;
-        const newAngle = t.angle + angleVar * (1 - t.depth*0.15);
-        const newLen = t.len? t.len * lerp(0.6, 1.05, Math.random()) : rand(8,20) * (plant.type==='succulent'?0.6:1);
-        const newThickness = Math.max(1, t.thickness * 0.75);
-        const nx = t.x + Math.cos(newAngle) * newLen;
-        const ny = t.y + Math.sin(newAngle) * newLen;
-        const nid = plant.nextId++;
-        const node = { x: nx, y: ny, angle: newAngle, len: newLen, thickness: newThickness, parent: t.id, depth: t.depth+1, grown:0, id: nid };
-        plant.nodes.push(node);
-        t.grown = 0;
-        // sometimes create lateral branch
-        if(Math.random() < branchProb && t.depth < 6){
-          const bangle = t.angle + rand(-1.6,1.6);
-          const blen = newLen * rand(0.6,0.95);
-          const bx = t.x + Math.cos(bangle)*blen;
-          const by = t.y + Math.sin(bangle)*blen;
-          const bid = plant.nextId++;
-          plant.nodes.push({ x: bx, y: by, angle: bangle, len: blen, thickness: newThickness*0.8, parent: t.id, depth: t.depth+1, grown:0, id: bid });
-        }
-      }
+    // draw recursive branches from top of trunk
+    const topX = endX, topY = endY;
+    // create multiple main branches
+    const mainBranches = state.type === 'tree' ? 3 : 2;
+    for(let i=0;i<mainBranches;i++){
+      const baseAngle = (i - (mainBranches-1)/2) * (params.angle * 1.4);
+      const len = trunkLen * (0.7 + (i*0.1));
+      drawBranch(topX, topY, len, baseAngle, 0, params, g, branchColor);
     }
 
-    // prune if too many nodes
-    if(plant.nodes.length > 1000){
-      plant.nodes.splice(200, plant.nodes.length-200);
+    // small leaves around trunk
+    for(let i=0;i<6;i++){
+      const rx = (Math.random()*2-1)*30;
+      const ry = -Math.random()*trunkLen*(0.4 + Math.random()*0.6);
+      const leaf = document.createElementNS('http://www.w3.org/2000/svg','ellipse');
+      leaf.setAttribute('cx', rx);
+      leaf.setAttribute('cy', ry);
+      leaf.setAttribute('rx', params.leafSize * (0.6 + Math.random()*0.6));
+      leaf.setAttribute('ry', params.leafSize * 0.35);
+      leaf.setAttribute('transform', `rotate(${(Math.random()*60-30)} ${rx} ${ry})`);
+      leaf.setAttribute('fill', state.type === 'succulent' ? 'url(#succGrad)' : 'url(#leafGrad)');
+      leaf.setAttribute('opacity', 0.9);
+      leaf.classList.add('leaf');
+      rootGroup.appendChild(leaf);
     }
   }
 
-  // Render utilities
-  function drawBackground() {
-    // sky / water depending on type
-    if(plant.type === 'algae'){
-      // water gradient
-      const g = ctx.createLinearGradient(0,0,0,H);
-      g.addColorStop(0,'#073b59');
-      g.addColorStop(0.6,'#06425a');
-      g.addColorStop(1,'#02324a');
-      ctx.fillStyle = g;
-      ctx.fillRect(0,0,W,H);
-      // sea floor
-      ctx.fillStyle = '#2b241a';
-      ctx.fillRect(0, plant.groundY, W, H - plant.groundY);
+  // update state from controls
+  function readControls(){
+    state.type = typeEl.value;
+    state.light = +lightEl.value;
+    state.temp = +tempEl.value;
+    state.hum = +humEl.value;
+  }
+
+  function tick(time){
+    state.time = time;
+    readControls();
+    // if algae, make water visible
+    if(state.type === 'algae'){
+      waterGroup.style.opacity = 1.0;
+      // center root group lower so fronds grow into water
+      rootGroup.setAttribute('transform','translate(400,460)');
     } else {
-      // ground + sky
-      const g = ctx.createLinearGradient(0,0,0,H);
-      g.addColorStop(0,'#0b2230');
-      g.addColorStop(0.6,'#08303a');
-      g.addColorStop(1,'#071a1d');
-      ctx.fillStyle = g;
-      ctx.fillRect(0,0,W,H);
-      // ground strip
-      ctx.fillStyle = '#0c2a1a';
-      ctx.fillRect(0, plant.groundY, W, H - plant.groundY);
-    }
-  }
-
-  function drawAlgae(p) {
-    const t = performance.now()/1000;
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    for(const b of p.blades){
-      const sway = Math.sin(t*1.2 + b.phase) * 12 * (0.5 + ( +lightIn.value/100 ));
-      const x0 = b.x;
-      const y0 = p.groundY;
-      const cpX = x0 + sway*0.6;
-      const cpY = y0 - b.length*0.4;
-      const tipX = x0 + sway;
-      const tipY = y0 - b.length;
-      // blade
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.quadraticCurveTo(cpX, cpY, tipX, tipY);
-      ctx.lineWidth = b.thickness;
-      ctx.strokeStyle = `hsl(${b.hue}deg 60% 40% / 0.95)`;
-      ctx.lineCap = 'round';
-      ctx.stroke();
-      // thin highlight
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.quadraticCurveTo(cpX*0.98, cpY*0.98, tipX*0.98, tipY*0.98);
-      ctx.lineWidth = Math.max(1, b.thickness*0.35);
-      ctx.strokeStyle = `hsla(${b.hue-30}deg,60%,70%,0.25)`;
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  function drawTree(p) {
-    // draw branches from root up
-    ctx.save();
-    // draw branches thicker -> thinner by depth
-    const nodes = p.nodes;
-    // compute order so parents drawn first
-    nodes.sort((a,b)=> (a.depth - b.depth));
-    for(const n of nodes){
-      if(n.parent === null) continue;
-      const parent = nodes.find(x=>x.id===n.parent) || {x:p.baseX,y:p.groundY};
-      const grad = ctx.createLinearGradient(parent.x,parent.y,n.x,n.y);
-      const hue = plant.type==='succulent'?120:100;
-      grad.addColorStop(0, `hsl(${hue-20}deg 40% 18%)`);
-      grad.addColorStop(1, `hsl(${hue-5}deg 45% 28%)`);
-      ctx.strokeStyle = grad;
-      ctx.lineWidth = clamp(n.thickness, 1, 18);
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(parent.x, parent.y);
-      // slight curvature
-      const cx = (parent.x + n.x)/2 + Math.sin(n.depth*1.7 + time*0.01)*6;
-      const cy = (parent.y + n.y)/2 + Math.cos(n.depth*1.3 + time*0.01)*6;
-      ctx.quadraticCurveTo(cx, cy, n.x, n.y);
-      ctx.stroke();
+      waterGroup.style.opacity = 0.0;
+      rootGroup.setAttribute('transform','translate(400,540)');
+      rootGroup.style.transform = '';
     }
 
-    // leaves: tips produce leaves
-    const tips = nodes.filter(n => !nodes.some(ch => ch.parent===n.id));
-    for(const t of tips){
-      // leaf parameters depend on type
-      const leafCount = plant.type==='succulent'?3: (t.depth>2? Math.round(1+Math.random()*2): Math.round(2+Math.random()*3));
-      for(let i=0;i<leafCount;i++){
-        const angle = t.angle + (Math.random()-0.5)*1.4;
-        const len = (plant.type==='succulent'?8:14) * (1 - t.depth*0.06) * (0.7 + Math.random()*0.6);
-        const lx = t.x + Math.cos(angle)*len;
-        const ly = t.y + Math.sin(angle)*len;
-        // leaf shape
-        ctx.beginPath();
-        ctx.moveTo(t.x, t.y);
-        const cpx = t.x + Math.cos(angle)*len*0.4 - Math.sin(angle)*len*0.2;
-        const cpy = t.y + Math.sin(angle)*len*0.4 + Math.cos(angle)*len*0.2;
-        ctx.quadraticCurveTo(cpx, cpy, lx, ly);
-        ctx.quadraticCurveTo(cpx, cpy, t.x, t.y);
-        // leaf color driven by health and spectrum
-        const s = +spectrumIn.value/100;
-        const green = clamp(50 + plant.health*30 + s*10, 30, 80);
-        const sat = plant.type==='succulent'?70:65;
-        ctx.fillStyle = `hsl(${green}  ${sat}%  ${plant.health*30+30}%)`;
-        ctx.fill();
-      }
-    }
+    // animate biomass slowly increasing when conditions good
+    buildPlant();
 
-    ctx.restore();
+    requestAnimationFrame(tick);
   }
 
-  function render() {
-    if(!plant) return;
-    drawBackground();
-    if(plant.type === 'algae') drawAlgae(plant);
-    else drawTree(plant);
-
-    // subtle overlay sun based on light
-    const L = +lightIn.value/100;
-    ctx.save();
-    ctx.globalCompositeOperation = 'overlay';
-    ctx.fillStyle = `rgba(255,235,180,${0.02 + 0.08*L})`;
-    ctx.fillRect(0,0,W,H);
-    ctx.restore();
-  }
-
-  // loop
-  let last = performance.now();
-  function loop(now){
-    const dtms = now - last;
-    last = now;
-    const dt = (dtms/16) * speed; // normalized steps
-    time += dt;
-    update(dt);
-    render();
-    // update UI values occasionally
-    biomEl.textContent = plant ? plant.biomass.toFixed(3) : '0.00';
-    healthEl.textContent = plant ? Math.round(plant.health*100) : '100';
-    modeEl.textContent = plant ? plant.type : '—';
-    requestAnimationFrame(loop);
-  }
-  requestAnimationFrame(loop);
-
-  // initial placement adjustments
-  function normalizePlantOnResize(){
-    if(!plant) return;
-    plant.baseX = W/2;
-    plant.groundY = H*(plant.type==='algae'?0.9:0.88);
-    // reposition trunk root
-    if(plant.nodes && plant.nodes.length){
-      plant.nodes[0].x = plant.baseX;
-      plant.nodes[0].y = plant.groundY;
-    }
-  }
-  window.addEventListener('resize', () => { fit(); normalizePlantOnResize(); });
-
-  // reset logic updated to new createPlant
-  resetBtn.addEventListener('click', () => { plant = createPlant(plantSel.value); });
-
-  // quick start: reset when changing sliders that drastically affect look
-  [lightIn, spectrumIn, tempIn, humidityIn, plantSel].forEach(el => {
-    el.addEventListener('input', () => {
-      // for major change, keep plant but tweak health/biomass slightly
-      if(plant) {
-        plant.health = clamp(plant.health * 0.997 + (+tempIn.value/40)*0.003, 0.01, 1);
-      }
-    });
+  // bindings
+  restartBtn.addEventListener('click', () => {
+    state.biomass = 0.05;
+    buildPlant();
   });
+
+  // initial placement
+  rootGroup.setAttribute('transform','translate(400,540)');
+  // kick loop
+  requestAnimationFrame(tick);
 
 })();
